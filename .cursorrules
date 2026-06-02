@@ -1,0 +1,30 @@
+# Portfolio Tracker Cursor Rules
+
+## Scope
+- Apply to all files in this repository.
+
+## Tech Stack
+- Electron + React + TypeScript + Tailwind CSS.
+- Local database uses Dexie (IndexedDB).
+- State management uses Zustand.
+
+## Coding Style
+- Keep changes minimal and focused.
+- Prefer shared utilities over duplicated matching logic.
+- Use explicit TypeScript types for interfaces and public helpers.
+- Keep UI text in Simplified Chinese unless a technical term is English.
+
+## Data Rules
+- Multi-user data must be isolated by `influencerId`.
+- Default influencer is `八喜`.
+- Do not introduce cross-user leakage in snapshots/holdings/analysis reads.
+
+## UI Rules
+- Follow industrial light theme defined in `src/renderer/src/index.css`.
+- Keep industry color mapping centralized in `src/renderer/src/utils/industry.ts`.
+- Feature flags / provider switches should remain env-driven.
+
+## Quality Gates
+- Before commit: run `npm run typecheck`.
+- Prefer fixing lint warnings in touched files.
+
