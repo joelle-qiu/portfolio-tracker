@@ -15,6 +15,55 @@ export interface Influencer {
 export type HoldingStatus = 'holding' | 'researched'
 export type PoolType = 'core' | 'config' | 'watch' | 'research' | 'all'
 
+export type OperationType = 'buy' | 'add' | 'hold' | 'reduce' | 'sell' | 'watch'
+export type TrendType = 'up' | 'down' | 'range' | 'unknown'
+export type MaSignalType = 'above_ma5' | 'below_ma10' | 'neutral'
+export type RiskLevel = 'low' | 'medium' | 'high'
+
+/**
+ * 从原文提取的结构化指标（导入时写入）。
+ */
+export interface HoldingMetrics {
+  operationType: OperationType
+  trend: TrendType
+  maSignal: MaSignalType
+  risk: RiskLevel
+  thesis: string
+  techTags: string[]
+  buyPointHint: string
+}
+
+export type SnapshotDiffKind = 'added' | 'removed' | 'tier_up' | 'tier_down' | 'operation' | 'pool' | 'unchanged'
+
+export interface StockDiffEntry {
+  stockName: string
+  kind: SnapshotDiffKind
+  prevTier?: number
+  currTier?: number
+  prevOperation?: string
+  currOperation?: string
+}
+
+export interface SnapshotDiff {
+  added: string[]
+  removed: string[]
+  tierChanged: StockDiffEntry[]
+  operationChanged: StockDiffEntry[]
+  poolChanged: StockDiffEntry[]
+  byStock: Map<string, SnapshotDiffKind>
+}
+
+export interface HoldingsTrendPoint {
+  version: string
+  createTime: string
+  total: number
+  core: number
+  config: number
+  watch: number
+  research: number
+  topCounts: Record<number, number>
+}
+
 /**
  * 持仓条目。
  */
@@ -34,6 +83,7 @@ export interface Holding {
   longTarget?: number
   support?: number
   holdingTier?: number
+  metrics?: HoldingMetrics
   techSignal: string
   reasonBrief: string
   longTermView: string
@@ -50,6 +100,8 @@ export interface Snapshot {
   version: string
   stocks: Holding[]
   summary: string
+  /** 表头前的持仓导语（TOP/配置仓原文），用于重算层级 */
+  positionSummary?: string
   createTime: string
 }
 

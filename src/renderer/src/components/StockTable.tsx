@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
-import { IndustryTag } from './IndustryTag'
-import type { Holding, PoolType, Snapshot } from '../types'
-import { normalizeIndustryFromL1L4 } from '../utils/industry'
+import type { Holding, PoolType, Snapshot, SnapshotDiff } from '../types'
+import { INDUSTRY_CHART_COLORS, normalizeIndustryFromL1L4 } from '../utils/industry'
 import { MockQuoteProvider, quoteProvider, type QuoteView } from '../services/quoteService'
 import { matchesTheme, type ThemeKey } from '../utils/themes'
+import { getDisplayTier } from './TopHoldingsLadder'
+import { matchesDiffFilter } from './DiffSummaryStrip'
+import type { DiffFilter } from '../store/useStore'
+import { buildHoldingMetrics } from '../utils/parserHelpers'
 
 export type PoolTab = PoolType
 
 interface StockTableProps {
   snapshot: Snapshot | null
+  diff?: SnapshotDiff | null
+  diffFilter?: DiffFilter
   onSelectStock?: (stock: Holding) => void
   activePool?: PoolTab
   activeTheme?: ThemeKey
@@ -18,7 +23,6 @@ function matchesPoolTab(stock: Holding, tab: PoolTab): boolean {
   if (tab === 'all') return true
   if (stock.poolType) return stock.poolType === tab
   const text = `${stock.group} ${stock.operation} ${stock.status}`
-
   switch (tab) {
     case 'core':
       return /(核心|TOP|top)/.test(text)
@@ -33,8 +37,37 @@ function matchesPoolTab(stock: Holding, tab: PoolTab): boolean {
   }
 }
 
+const OP_LABEL: Record<string, string> = {
+  buy: '买',
+  add: '加',
+  hold: '持',
+  reduce: '减',
+  sell: '卖',
+  watch: '观'
+}
+
+const CHANGE_LABEL: Record<string, string> = {
+  added: '新',
+  removed: '退',
+  tier_up: '升',
+  tier_down: '降',
+  operation: '变',
+  pool: '池',
+  unchanged: '-'
+}
+
+function formatKeyPrices(stock: Holding): string {
+  const parts: string[] = []
+  if (stock.support !== undefined) parts.push(`支${stock.support}`)
+  if (stock.stopLoss !== undefined) parts.push(`损${stock.stopLoss}`)
+  if (stock.shortTarget !== undefined) parts.push(`目${stock.shortTarget}`)
+  return parts.length ? parts.join(' ') : '-'
+}
+
 export function StockTable({
   snapshot,
+  diff,
+  diffFilter = 'all',
   onSelectStock,
   activePool = 'all',
   activeTheme
@@ -43,8 +76,15 @@ export function StockTable({
 
   const rows = useMemo(() => {
     if (!snapshot) return []
-    return snapshot.stocks.filter((item) => matchesPoolTab(item, activePool) && matchesTheme(item, activeTheme))
-  }, [snapshot, activePool, activeTheme])
+    return snapshot.stocks.filter((item) => {
+      if (!matchesPoolTab(item, activePool)) return false
+      if (!matchesTheme(item, activeTheme)) return false
+      if (diff && diffFilter !== 'all' && diffFilter !== 'removed') {
+        return matchesDiffFilter(item.stockName, diffFilter, diff)
+      }
+      return true
+    })
+  }, [snapshot, activePool, activeTheme, diff, diffFilter])
 
   useEffect(() => {
     let active = true
@@ -65,13 +105,6 @@ export function StockTable({
     }
   }, [rows])
 
-  const getOperationColor = (operation: string): string => {
-    if (/(持有|加仓|买入|看好)/.test(operation)) return 'var(--color-red)'
-    if (/(减仓|清仓|止损|卖出)/.test(operation)) return 'var(--color-green)'
-    if (/(观测|关注)/.test(operation)) return 'var(--color-yellow)'
-    return '#555555'
-  }
-
   if (!snapshot) {
     return (
       <div className="rounded-sm border border-[var(--color-border)] bg-[var(--color-card)] p-4 text-sm text-[#888888]">
@@ -80,150 +113,151 @@ export function StockTable({
     )
   }
 
+  const showRemoved = diffFilter === 'removed' && diff && diff.removed.length > 0
+
   return (
     <div className="rounded-sm border border-[var(--color-border)] bg-[var(--color-card)]">
       <div className="border-b border-[var(--color-border)] p-3 text-sm text-[#555555]">
-        <div>
-          版本：{snapshot.version} ｜ 条目：{rows.length}
-          {activeTheme ? ` ｜ 主题筛选：${activeTheme}` : ''}
-        </div>
+        版本：{snapshot.version} ｜ 条目：{showRemoved ? diff!.removed.length : rows.length}
+        {activeTheme ? ` ｜ 主题：${activeTheme}` : ''}
       </div>
 
-      <div className="max-h-[520px] overflow-auto">
+      <div className="max-h-[480px] overflow-auto">
         <table className="w-full border-collapse text-left text-xs">
           <thead className="sticky top-0 bg-[#F9F9F9] text-[#555555]">
             <tr>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">证券</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">行业</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">操作</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">当前价</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">涨跌幅</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">止损</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">短期目标</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">长期目标</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">支撑</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">买点判断</th>
-              <th className="border-b border-[var(--color-border)] px-3 py-2">技术面</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2 w-8">TOP</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2">证券</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2 w-6" />
+              <th className="border-b border-[var(--color-border)] px-2 py-2 w-8">操</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2">价/涨跌</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2">关键位</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2">信号</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2">买点</th>
+              <th className="border-b border-[var(--color-border)] px-2 py-2 w-8">变</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((item) => (
-              (() => {
-                const quote = rowQuotes.get(item.id) ?? { currentPrice: 0, changePct: 0 }
-                const breached = item.stopLoss !== undefined && quote.currentPrice < item.stopLoss
-                const reachedShort = item.shortTarget !== undefined && quote.currentPrice > item.shortTarget
-                const nearShort =
-                  item.shortTarget !== undefined &&
-                  !reachedShort &&
-                  quote.currentPrice >= item.shortTarget * 0.95
-                const ma5 = quote.currentPrice * (1 - quote.changePct / 100 / 2.5)
-                const ma10 = quote.currentPrice * (1 - quote.changePct / 100 / 1.25)
-                const aboveMa5 = quote.currentPrice >= ma5
-                const belowMa10 = quote.currentPrice < ma10
-
-                return (
-                  <tr
-                    key={item.id}
-                    className={`cursor-pointer hover:bg-[#FAFAFA] ${breached ? 'bg-red-50' : ''}`}
-                    onClick={() => onSelectStock?.(item)}
-                  >
-                <td className="border-b border-[var(--color-border)] px-3 py-2 text-[#333333]">
-                  {item.stockName}
-                </td>
-                <td className="border-b border-[var(--color-border)] px-3 py-2">
-                  <IndustryTag industry={normalizeIndustryFromL1L4(item.industryL1, item.industryL4)} />
-                </td>
-                <td
-                  className="border-b border-[var(--color-border)] px-3 py-2"
-                  style={{ color: getOperationColor(item.operation) }}
-                >
-                  {item.operation || '-'}
-                </td>
-                <td className="border-b border-[var(--color-border)] px-3 py-2 text-[#333333]">
-                  {quote.currentPrice.toFixed(2)}
-                </td>
-                <td
-                  className="border-b border-[var(--color-border)] px-3 py-2 font-medium"
-                  style={{ color: quote.changePct >= 0 ? 'var(--color-red)' : 'var(--color-green)' }}
-                >
-                  {quote.changePct >= 0 ? '↑' : '↓'} {Math.abs(quote.changePct).toFixed(2)}%
-                </td>
-                <td
-                  className="border-b border-[var(--color-border)] px-3 py-2"
-                  style={{
-                    color: breached ? '#dc2626' : item.stopLoss !== undefined ? 'var(--color-yellow)' : '#555555'
-                  }}
-                >
-                  {item.stopLoss ?? '-'} {breached ? '⚠️' : ''}
-                </td>
-                <td className="border-b border-[var(--color-border)] px-3 py-2">
-                  <div className="flex items-center gap-1">
-                    <span style={{ color: item.shortTarget !== undefined ? 'var(--color-red)' : '#555555' }}>
-                      {item.shortTarget ?? '-'}
-                    </span>
-                    {reachedShort ? (
-                      <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px] text-green-700">已达标</span>
-                    ) : null}
-                    {nearShort ? (
-                      <span className="rounded bg-yellow-50 px-1.5 py-0.5 text-[10px] text-yellow-700">
-                        接近目标
-                      </span>
-                    ) : null}
-                  </div>
-                </td>
-                <td className="border-b border-[var(--color-border)] px-3 py-2 text-[#555555]">
-                  {item.longTarget ?? '-'}
-                </td>
-                <td
-                  className="border-b border-[var(--color-border)] px-3 py-2"
-                  style={{ color: item.support !== undefined ? 'var(--color-blue)' : '#555555' }}
-                >
-                  {item.support ?? '-'}
-                </td>
-                <td className="border-b border-[var(--color-border)] px-3 py-2">
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] ${
-                      breached
-                        ? 'bg-red-50 text-red-700'
-                        : item.support !== undefined &&
-                            Math.abs(quote.currentPrice - item.support) / item.support <= 0.03
-                          ? 'bg-blue-50 text-blue-700'
-                          : item.shortTarget !== undefined &&
-                              quote.currentPrice > item.shortTarget * 0.95 &&
-                              quote.currentPrice <= item.shortTarget
-                            ? 'bg-yellow-50 text-yellow-700'
-                            : belowMa10
-                              ? 'bg-yellow-50 text-yellow-700'
-                              : 'bg-green-50 text-green-700'
-                    }`}
-                  >
-                    {breached
-                      ? '破位谨慎'
-                      : item.support !== undefined &&
-                          Math.abs(quote.currentPrice - item.support) / item.support <= 0.03
-                        ? '接近支撑可埋伏'
-                        : item.shortTarget !== undefined &&
-                            quote.currentPrice > item.shortTarget * 0.95 &&
-                            quote.currentPrice <= item.shortTarget
-                          ? '接近目标勿追高'
-                          : belowMa10
-                            ? '跌破10日线，考虑撤退'
-                            : aboveMa5
-                              ? '不破5日线偏强'
-                              : '等待回踩均线'}
-                  </span>
-                </td>
-                <td className="max-w-[320px] border-b border-[var(--color-border)] px-3 py-2 text-[#888888]">
-                  {item.techSignal || '-'}
-                </td>
+            {showRemoved
+              ? diff!.removed.map((name) => (
+                  <tr key={name} className="bg-green-50/50 text-[#666]">
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">-</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">{name}</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2" />
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">-</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">-</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">-</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">-</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2">-</td>
+                    <td className="border-b border-[var(--color-border)] px-2 py-2 text-green-700">退</td>
                   </tr>
-                )
-              })()
-            ))}
+                ))
+              : null}
+            {!showRemoved
+              ? rows.map((item) => {
+                  const quote = rowQuotes.get(item.id) ?? { currentPrice: 0, changePct: 0 }
+                  const industry = normalizeIndustryFromL1L4(item.industryL1, item.industryL4)
+                  const metrics =
+                    item.metrics ??
+                    buildHoldingMetrics({
+                      operation: item.operation,
+                      reasonBrief: item.reasonBrief,
+                      longTermView: item.longTermView,
+                      shortTermView: item.shortTermView,
+                      techSignal: item.techSignal,
+                      stopLoss: item.stopLoss,
+                      shortTarget: item.shortTarget,
+                      support: item.support
+                    })
+                  const tier = getDisplayTier(item)
+                  const changeKind = diff?.byStock.get(item.stockName) ?? 'unchanged'
+                  const changeLabel = CHANGE_LABEL[changeKind] ?? '-'
+
+                  return (
+                    <tr
+                      key={item.id}
+                      className="cursor-pointer hover:bg-[#FAFAFA]"
+                      onClick={() => onSelectStock?.(item)}
+                    >
+                      <td className="border-b border-[var(--color-border)] px-2 py-2 font-semibold text-[#666]">
+                        {tier ?? '-'}
+                      </td>
+                      <td className="border-b border-[var(--color-border)] px-2 py-2 font-medium text-[#333]">
+                        {item.stockName}
+                      </td>
+                      <td className="border-b border-[var(--color-border)] px-2 py-2">
+                        <span
+                          className="inline-block h-3 w-3 rounded-sm border border-[var(--color-border)]"
+                          style={{ backgroundColor: INDUSTRY_CHART_COLORS[industry] }}
+                          title={industry}
+                        />
+                      </td>
+                      <td
+                        className="border-b border-[var(--color-border)] px-2 py-2 font-semibold"
+                        style={{
+                          color:
+                            metrics.operationType === 'reduce' || metrics.operationType === 'sell'
+                              ? 'var(--color-green)'
+                              : metrics.operationType === 'watch'
+                                ? 'var(--color-yellow)'
+                                : 'var(--color-red)'
+                        }}
+                      >
+                        {OP_LABEL[metrics.operationType] ?? '持'}
+                      </td>
+                      <td className="border-b border-[var(--color-border)] px-2 py-2">
+                        <span className="text-[#333]">{quote.currentPrice.toFixed(2)}</span>
+                        <span
+                          className="ml-1"
+                          style={{ color: quote.changePct >= 0 ? 'var(--color-red)' : 'var(--color-green)' }}
+                        >
+                          {quote.changePct >= 0 ? '+' : ''}
+                          {quote.changePct.toFixed(1)}%
+                        </span>
+                      </td>
+                      <td className="border-b border-[var(--color-border)] px-2 py-2 text-[#666]">
+                        {formatKeyPrices(item)}
+                      </td>
+                      <td className="border-b border-[var(--color-border)] px-2 py-2">
+                        <div className="flex flex-wrap gap-0.5">
+                          {metrics.techTags.slice(0, 2).map((tag) => (
+                            <span
+                              key={tag}
+                              className="rounded bg-[#F0F0F0] px-1 py-0.5 text-[10px] text-[#666]"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                          {!metrics.techTags.length ? <span className="text-[#bbb]">-</span> : null}
+                        </div>
+                      </td>
+                      <td className="border-b border-[var(--color-border)] px-2 py-2">
+                        <span className="rounded bg-blue-50 px-1 py-0.5 text-[10px] text-blue-700">
+                          {metrics.buyPointHint}
+                        </span>
+                      </td>
+                      <td
+                        className="border-b border-[var(--color-border)] px-2 py-2 font-semibold"
+                        style={{
+                          color:
+                            changeKind === 'added' || changeKind === 'tier_up'
+                              ? 'var(--color-red)'
+                              : changeKind === 'removed' || changeKind === 'tier_down'
+                                ? 'var(--color-green)'
+                                : changeKind === 'operation'
+                                  ? 'var(--color-yellow)'
+                                  : '#bbb'
+                        }}
+                      >
+                        {changeLabel}
+                      </td>
+                    </tr>
+                  )
+                })
+              : null}
           </tbody>
         </table>
       </div>
     </div>
   )
 }
-

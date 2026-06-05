@@ -1,11 +1,17 @@
 import * as XLSX from 'xlsx'
 import type { Holding, Snapshot } from '../types'
 import {
+  buildHoldingMetrics,
   extractPricePoints,
   inferGroupByKeywords,
   inferHoldingStatus,
   inferPoolType
 } from '../utils/parserHelpers'
+import {
+  findTierForStock,
+  isConfigStock,
+  parseTopTierHintsFromIntro
+} from '../utils/topTierMapping'
 
 interface HeaderMap {
   stockName: number
@@ -73,50 +79,21 @@ function detectHeader(rows: unknown[][]): { rowIndex: number; map: HeaderMap } {
   throw new Error('未识别到有效表头（请确认包含证券名称、近期操作等列）')
 }
 
-function normalizeStockNameForMatch(name: string): string {
-  const text = name.replace(/\s+/g, '')
-  if (text === '厦钨') return '厦门钨业'
-  return text
-}
-
 function parseTopTierHints(rows: unknown[][], headerRowIndex: number): {
   tierByStock: Map<string, number>
   configStocks: Set<string>
 } {
   const introText = rows
     .slice(0, headerRowIndex)
-    .map((row) => String(row[1] ?? row[0] ?? '').trim())
+    .map((row) =>
+      (row as unknown[])
+        .map((cell) => String(cell ?? '').trim())
+        .filter(Boolean)
+        .join(' ')
+    )
     .join('\n')
 
-  const tierByStock = new Map<string, number>()
-  const configStocks = new Set<string>()
-
-  const topRegex = /TOP\s*([1-6])[:：]\s*([\s\S]*?)(?=TOP\s*[1-6][:：]|配置仓|总仓位|$)/gi
-  const cnTokenRegex = /[\u4e00-\u9fa5A-Za-z]{2,}/g
-  let match: RegExpExecArray | null = topRegex.exec(introText)
-  while (match) {
-    const tier = Number.parseInt(match[1], 10)
-    const block = match[2] ?? ''
-    const tokens = block.match(cnTokenRegex) ?? []
-    tokens.forEach((token) => {
-      const key = normalizeStockNameForMatch(token)
-      // 跳过主题词，保留疑似股票名。
-      if (/(碳酸锂|仓位|控制|思路|长期|继续|看好)/.test(key)) return
-      if (!tierByStock.has(key)) tierByStock.set(key, tier)
-    })
-    match = topRegex.exec(introText)
-  }
-
-  const cfgMatch = introText.match(/配置仓[\s\S]*?[:：]\s*([\s\S]*?)(?=总仓位|此外|Norecomend|$)/i)
-  if (cfgMatch?.[1]) {
-    const tokens = cfgMatch[1].match(cnTokenRegex) ?? []
-    tokens.forEach((token) => {
-      const key = normalizeStockNameForMatch(token)
-      if (!/(超长期|配置仓|长期|总仓位)/.test(key)) configStocks.add(key)
-    })
-  }
-
-  return { tierByStock, configStocks }
+  return parseTopTierHintsFromIntro(introText)
 }
 
 /**
@@ -130,6 +107,15 @@ export function parseExcelFile(arrayBuffer: ArrayBuffer, influencerId: string): 
   const sheet = workbook.Sheets[firstSheetName]
   const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' }) as unknown[][]
   const { rowIndex: headerRowIndex, map } = detectHeader(rows)
+  const positionSummary = rows
+    .slice(0, headerRowIndex)
+    .map((row) =>
+      (row as unknown[])
+        .map((cell) => String(cell ?? '').trim())
+        .filter(Boolean)
+        .join(' ')
+    )
+    .join('\n')
   const { tierByStock, configStocks } = parseTopTierHints(rows, headerRowIndex)
 
   const snapshotId = crypto.randomUUID()
@@ -151,13 +137,32 @@ export function parseExcelFile(arrayBuffer: ArrayBuffer, influencerId: string): 
 
     const shortTermText = String(row[map.shortTerm] ?? '').trim()
     const extracted = extractPricePoints(shortTermText)
-    const normalizedStock = normalizeStockNameForMatch(stockName)
-    const hasTopTier = tierByStock.has(normalizedStock)
-    const inConfig = configStocks.has(normalizedStock)
+    const inConfig = isConfigStock(stockName, configStocks)
+    const holdingTier = inConfig ? undefined : findTierForStock(stockName, tierByStock)
+    const hasTopTier = holdingTier !== undefined
     const baseStatus = inferHoldingStatus(operation)
     const status = hasTopTier || inConfig ? 'holding' : baseStatus
-    const poolType = inConfig ? 'config' : hasTopTier ? 'core' : inferPoolType(currentGroup, operation, status)
-    const holdingTier = tierByStock.get(normalizedStock)
+    const poolType = inConfig
+      ? 'config'
+      : hasTopTier
+        ? 'core'
+        : inferPoolType(currentGroup, operation, status)
+
+    const reasonBrief = String(row[map.reason] ?? '').trim()
+    const longTermView = String(row[map.longTerm] ?? '').trim()
+    const techSignal = String(row[map.tech] ?? '').trim()
+    const fundamentals = String(row[map.fundamentals] ?? '').trim()
+
+    const holdingBase = {
+      operation,
+      reasonBrief,
+      longTermView,
+      shortTermView: shortTermText,
+      techSignal,
+      stopLoss: extracted.stopLoss,
+      shortTarget: extracted.shortTarget,
+      support: extracted.support
+    }
 
     holdings.push({
       id: crypto.randomUUID(),
@@ -170,16 +175,17 @@ export function parseExcelFile(arrayBuffer: ArrayBuffer, influencerId: string): 
       group: currentGroup,
       industryL4: String(row[map.industryL4] ?? '').trim(),
       industryL1: String(row[map.industryL1] ?? '').trim(),
-      reasonBrief: String(row[map.reason] ?? '').trim(),
-      longTermView: String(row[map.longTerm] ?? '').trim(),
+      reasonBrief,
+      longTermView,
       shortTermView: shortTermText,
-      fundamentals: String(row[map.fundamentals] ?? '').trim(),
-      techSignal: String(row[map.tech] ?? '').trim(),
+      fundamentals,
+      techSignal,
       stopLoss: extracted.stopLoss,
       shortTarget: extracted.shortTarget,
       longTarget: extracted.longTarget,
       support: extracted.support,
-      holdingTier
+      holdingTier,
+      metrics: buildHoldingMetrics(holdingBase)
     })
   }
 
@@ -189,6 +195,7 @@ export function parseExcelFile(arrayBuffer: ArrayBuffer, influencerId: string): 
     version,
     stocks: holdings,
     summary: `导入 ${firstSheetName}，共解析 ${holdings.length} 条持仓`,
+    positionSummary,
     createTime: new Date().toISOString()
   }
 }
